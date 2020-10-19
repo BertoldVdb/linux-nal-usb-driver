@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for NAL Research Corporation USB Serial converter.
- * Tested using NAL A3LA-XG.
+ * Tested using A3LA-XG.
  *
  * Copyright (C) 2020 Bertold Van den Bergh (vandenbergh@bertold.org)
  *
@@ -31,16 +31,20 @@ struct nal_serial_private {
 	spinlock_t               lock;
 	struct workqueue_struct *work_queue;
 	struct mutex             cmd_mutex;
-	unsigned char            cmd_buf[2];
+	unsigned char            cmd_buf[64];
 	wait_queue_head_t        control_event;
 	unsigned char            control_get;
 	unsigned char            control_put;
 	struct work_struct       control_work;
+	struct work_struct       data_work;
+	unsigned char            header_type;
 };
 
 static int nal_prepare_write_buffer(struct usb_serial_port *port,
 					void *buf, size_t count);
 static void nal_process_read_urb(struct urb *urb);
+static int nal_request(struct nal_serial_private *priv, int type);
+static void nal_data_work(struct work_struct *work);
 static int nal_tiocmget(struct tty_struct *tty);
 static int nal_send_control(struct nal_serial_private *priv,
 			unsigned int set, unsigned int clear);
@@ -81,35 +85,106 @@ static struct usb_serial_driver * const serial_drivers[] = {
 static int nal_prepare_write_buffer(struct usb_serial_port *port,
 					void *buf, size_t count)
 {
+	struct nal_serial_private *priv = usb_get_serial_port_data(port);	
 	unsigned char *header = (unsigned char*)buf;
+	unsigned char header_type, cout;
+
+	spin_lock(&priv->lock);
+	header_type = priv->header_type;
+	spin_unlock(&priv->lock);
+
+	count = min_t(size_t, count, 64 - header_type);
+
+	cout = kfifo_out_locked(&port->write_fifo, buf + header_type,
+		count, &port->lock) + header_type;
+
 	header[0] = 5;
 
-	return kfifo_out_locked(&port->write_fifo, buf + 1,
-		min_t(size_t, count, 63), &port->lock) + 1;
+	if (!header_type)
+		return 0;
+	else if (header_type == 2){
+		header[1] = count;
+		return 64;
+	}
+	
+	return cout;
 }
 
 static void nal_process_read_urb(struct urb *urb)
 {
 	struct usb_serial_port *port = urb->context;
 	struct nal_serial_private *priv = usb_get_serial_port_data(port);
-	const unsigned char *buf = (unsigned char*)urb->transfer_buffer;
+	const unsigned char *buf = (const unsigned char*)urb->transfer_buffer;
+	unsigned char length;
 
 	if (urb->actual_length < 1)
 		return;
 
-	if (buf[0] == 5){
-		tty_insert_flip_string(&port->port, buf + 1,
-			urb->actual_length - 1);
+	if (!priv->header_type) {
+		spin_lock(&priv->lock);
+		if (urb->actual_length < 64) {
+			priv->header_type = 1;
+		}
+		spin_unlock(&priv->lock);
+	}
+
+	schedule_work(&priv->data_work);
+
+	if (buf[0] == 5 && urb->actual_length >= 2){
+		if (!priv->header_type)
+			return;
+		else if (priv->header_type == 1)
+			tty_insert_flip_string(&port->port, buf + 1,
+				urb->actual_length - 1);
+		else {
+			length = buf[1];
+			if (length > urb->actual_length - 2)
+				length = urb->actual_length - 2;
+
+			tty_insert_flip_string(&port->port, buf + 2, length);
+		}
+
 		tty_flip_buffer_push(&port->port);
-	} else if (buf[0] == 1){ 
-		schedule_work(&priv->control_work);
 	} else if (buf[0] == 0 && urb->actual_length >= 2) {
 		spin_lock(&priv->lock);
 		priv->control_get = 0x80 | buf[1];
+		if (urb->actual_length == 64){
+			priv->header_type = 2;
+		}
 		spin_unlock(&priv->lock);
 
 		wake_up(&priv->control_event);
-	}
+	} else if (buf[0] == 1 && urb->actual_length >= 1)
+		schedule_work(&priv->control_work);
+	else 
+		dev_info(&priv->dev->dev, "Unsupported input (%u): %02x\n", urb->actual_length, buf[0]);
+}
+
+static int nal_request(struct nal_serial_private *priv, int type)
+{
+	int retVal;
+
+	mutex_lock(&priv->cmd_mutex);
+
+	/* type==0: Request control lines
+	 * type==1: Request application data */
+	priv->cmd_buf[0] = type?0x04:0x01;
+	priv->cmd_buf[1] = 0xFF;
+
+	retVal = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
+		priv->cmd_buf, 64, NULL, HZ);
+
+	mutex_unlock(&priv->cmd_mutex);
+
+	return retVal;
+}
+
+static void nal_data_work(struct work_struct *work)
+{
+	struct nal_serial_private *priv = 
+		container_of(work, struct nal_serial_private, data_work);
+
+	nal_request(priv, 1);
 }
 
 static int nal_tiocmget(struct tty_struct *tty)
@@ -122,16 +197,7 @@ static int nal_tiocmget(struct tty_struct *tty)
 	priv->control_get = 0;
 	spin_unlock(&priv->lock);
 
-	mutex_lock(&priv->cmd_mutex);
-
-	priv->cmd_buf[0] = 0x01;
-	priv->cmd_buf[1] = 0xFF;
-
-	retVal = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
-		priv->cmd_buf, 2, NULL, HZ);
-
-	mutex_unlock(&priv->cmd_mutex);
-
+	retVal = nal_request(priv, 0);
 	if (retVal)
 		return retVal;
 
@@ -164,8 +230,11 @@ static int nal_tiocmget(struct tty_struct *tty)
 }
 
 static int nal_send_control(struct nal_serial_private *priv,
-			unsigned int set, unsigned int clear){
+			unsigned int set, unsigned int clear)
+{
 	int retVal, control;
+
+	mutex_lock(&priv->cmd_mutex);
 
 	spin_lock(&priv->lock);
 	if (set & TIOCM_RTS) {
@@ -184,13 +253,11 @@ static int nal_send_control(struct nal_serial_private *priv,
 	control = priv->control_put;
 	spin_unlock(&priv->lock);
 
-	mutex_lock(&priv->cmd_mutex);
-
 	priv->cmd_buf[0] = 0x00;
 	priv->cmd_buf[1] = 0x0d | control;
 
 	retVal = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
-		priv->cmd_buf, 2, NULL, HZ);
+		priv->cmd_buf, 64, NULL, HZ);
 
 	mutex_unlock(&priv->cmd_mutex);
 
@@ -244,10 +311,16 @@ static int nal_port_probe(struct usb_serial_port *serial)
 		goto fail_queue;
 	}
 
-	INIT_WORK(&priv->control_work, nal_control_work);
-
 	usb_set_serial_port_data(serial, priv);
+
+	INIT_WORK(&priv->control_work, nal_control_work);
+	INIT_WORK(&priv->data_work, nal_data_work);
 	
+	/* Used for header autodetect */
+	retVal = nal_request(priv, 0);
+	if (retVal < 0)
+		goto fail_probe;
+
 	retVal = nal_send_control(priv, TIOCM_RTS | TIOCM_DTR, 0);
 	if (retVal < 0)
 		goto fail_probe;
@@ -255,6 +328,7 @@ static int nal_port_probe(struct usb_serial_port *serial)
 	return 0;
 
 fail_probe:
+	cancel_work_sync(&priv->data_work);
 	cancel_work_sync(&priv->control_work);
 	destroy_workqueue(priv->work_queue);
 fail_queue:
@@ -266,6 +340,7 @@ static int nal_port_remove(struct usb_serial_port *serial)
 {
 	struct nal_serial_private *priv = usb_get_serial_port_data(serial);
 
+	cancel_work_sync(&priv->data_work);
 	cancel_work_sync(&priv->control_work);
 	destroy_workqueue(priv->work_queue);
 	kfree(priv);
