@@ -120,11 +120,9 @@ static void nal_process_read_urb(struct urb *urb)
 	if (urb->actual_length < 1)
 		return;
 
-	if (!priv->header_type) {
+	if (!priv->header_type && urb->actual_length < 64) {
 		spin_lock(&priv->lock);
-		if (urb->actual_length < 64) {
-			priv->header_type = 1;
-		}
+		priv->header_type = 1;
 		spin_unlock(&priv->lock);
 	}
 
@@ -149,7 +147,7 @@ static void nal_process_read_urb(struct urb *urb)
 	} else if (buf[0] == 0 && urb->actual_length >= 2) {
 		spin_lock(&priv->lock);
 		priv->control_get = 0x80 | buf[1];
-		if (urb->actual_length == 64){
+		if (!priv->header_type && urb->actual_length == 64){
 			priv->header_type = 2;
 		}
 		spin_unlock(&priv->lock);
