@@ -155,7 +155,7 @@ static void nal_process_read_urb(struct urb *urb)
 		spin_unlock(&priv->lock);
 
 		wake_up(&priv->control_event);
-	} else if (buf[0] == 1 && urb->actual_length >= 1)
+	} else if (buf[0] == 1)
 		schedule_work(&priv->control_work);
 	else 
 		dev_info(&priv->dev->dev, "Unsupported input (%u): %02x\n", urb->actual_length, buf[0]);
