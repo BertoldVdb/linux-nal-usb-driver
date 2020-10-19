@@ -227,6 +227,7 @@ static void nal_control_work(struct work_struct *work)
 static int nal_port_probe(struct usb_serial_port *serial)
 {
 	struct nal_serial_private *priv;
+	int retVal;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -238,18 +239,27 @@ static int nal_port_probe(struct usb_serial_port *serial)
 	mutex_init(&priv->cmd_mutex);
 
 	priv->work_queue = alloc_workqueue("nal_wq", 0, 0);
-	if (!priv->work_queue)
-		goto fail_alloc;
+	if (!priv->work_queue) {
+		retVal = -ENOMEM;
+		goto fail_queue;
+	}
 
 	INIT_WORK(&priv->control_work, nal_control_work);
 
 	usb_set_serial_port_data(serial, priv);
+	
+	retVal = nal_send_control(priv, TIOCM_RTS | TIOCM_DTR, 0);
+	if (retVal < 0)
+		goto fail_probe;
 
-	return nal_send_control(priv, TIOCM_RTS | TIOCM_DTR, 0);
+	return 0;
 
-fail_alloc:
+fail_probe:
+	cancel_work_sync(&priv->control_work);
+	destroy_workqueue(priv->work_queue);
+fail_queue:
 	kfree(priv);
-	return -ENOMEM;
+	return retVal;
 }
 
 static int nal_port_remove(struct usb_serial_port *serial)
