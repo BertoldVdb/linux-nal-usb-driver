@@ -161,7 +161,7 @@ static void nal_process_read_urb(struct urb *urb)
 
 static int nal_request(struct nal_serial_private *priv, int type)
 {
-	int retVal;
+	int ret_val;
 
 	mutex_lock(&priv->cmd_mutex);
 
@@ -170,12 +170,12 @@ static int nal_request(struct nal_serial_private *priv, int type)
 	priv->cmd_buf[0] = type?0x04:0x01;
 	priv->cmd_buf[1] = 0xFF;
 
-	retVal = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
+	ret_val = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
 		priv->cmd_buf, 64, NULL, HZ);
 
 	mutex_unlock(&priv->cmd_mutex);
 
-	return retVal;
+	return ret_val;
 }
 
 static void nal_data_work(struct work_struct *work)
@@ -190,30 +190,30 @@ static int nal_tiocmget(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct nal_serial_private *priv = usb_get_serial_port_data(port);
-        int retVal, control = 0;
+        int ret_val, control = 0;
 
 	spin_lock(&priv->lock);
 	priv->control_get = 0;
 	spin_unlock(&priv->lock);
 
-	retVal = nal_request(priv, 0);
-	if (retVal)
-		return retVal;
+	ret_val = nal_request(priv, 0);
+	if (ret_val)
+		return ret_val;
 
 	while(!control){
-		retVal = wait_event_interruptible_timeout(priv->control_event,
+		ret_val = wait_event_interruptible_timeout(priv->control_event,
 				priv->control_get > 0, HZ);
-		if (retVal == 0) 
-			retVal = -ETIMEDOUT;
-		if (retVal < 0)
-			return retVal;
+		if (ret_val == 0) 
+			ret_val = -ETIMEDOUT;
+		if (ret_val < 0)
+			return ret_val;
 
 		spin_lock(&priv->lock);
 		control = priv->control_get;
 		spin_unlock(&priv->lock);
 	}
 
-	retVal = ((control & CONTROL_DSR) ? TIOCM_DSR : 0) |
+	ret_val = ((control & CONTROL_DSR) ? TIOCM_DSR : 0) |
 		 ((control & CONTROL_CD)  ? TIOCM_CD  : 0) |
 		 ((control & CONTROL_RI)  ? TIOCM_RI  : 0) |
 		 ((control & CONTROL_CTS) ? TIOCM_CTS : 0);
@@ -222,16 +222,16 @@ static int nal_tiocmget(struct tty_struct *tty)
 	control = priv->control_put;
 	spin_unlock(&priv->lock);
 
-	retVal |= ((control & CONTROL_DTR) ? TIOCM_DTR : 0) |
+	ret_val |= ((control & CONTROL_DTR) ? TIOCM_DTR : 0) |
 		  ((control & CONTROL_RTS) ? TIOCM_RTS : 0);
 
-	return retVal;
+	return ret_val;
 }
 
 static int nal_send_control(struct nal_serial_private *priv,
 			unsigned int set, unsigned int clear)
 {
-	int retVal, control;
+	int ret_val, control;
 
 	mutex_lock(&priv->cmd_mutex);
 
@@ -255,12 +255,12 @@ static int nal_send_control(struct nal_serial_private *priv,
 	priv->cmd_buf[0] = 0x00;
 	priv->cmd_buf[1] = 0x0d | control;
 
-	retVal = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
+	ret_val = usb_bulk_msg(priv->dev, usb_sndbulkpipe(priv->dev, 1),
 		priv->cmd_buf, 64, NULL, HZ);
 
 	mutex_unlock(&priv->cmd_mutex);
 
-	return retVal;
+	return ret_val;
 }
 
 static int nal_tiocmset(struct tty_struct *tty,
@@ -293,7 +293,7 @@ static void nal_control_work(struct work_struct *work)
 static int nal_port_probe(struct usb_serial_port *serial)
 {
 	struct nal_serial_private *priv;
-	int retVal;
+	int ret_val;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -306,7 +306,7 @@ static int nal_port_probe(struct usb_serial_port *serial)
 
 	priv->work_queue = alloc_workqueue("nal_wq", 0, 0);
 	if (!priv->work_queue) {
-		retVal = -ENOMEM;
+		ret_val = -ENOMEM;
 		goto fail_queue;
 	}
 
@@ -316,12 +316,12 @@ static int nal_port_probe(struct usb_serial_port *serial)
 	INIT_WORK(&priv->data_work, nal_data_work);
 	
 	/* Used for header autodetect */
-	retVal = nal_request(priv, 0);
-	if (retVal < 0)
+	ret_val = nal_request(priv, 0);
+	if (ret_val < 0)
 		goto fail_probe;
 
-	retVal = nal_send_control(priv, TIOCM_RTS | TIOCM_DTR, 0);
-	if (retVal < 0)
+	ret_val = nal_send_control(priv, TIOCM_RTS | TIOCM_DTR, 0);
+	if (ret_val < 0)
 		goto fail_probe;
 
 	return 0;
@@ -332,7 +332,7 @@ fail_probe:
 	destroy_workqueue(priv->work_queue);
 fail_queue:
 	kfree(priv);
-	return retVal;
+	return ret_val;
 }
 
 static int nal_port_remove(struct usb_serial_port *serial)
