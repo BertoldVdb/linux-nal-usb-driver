@@ -128,7 +128,8 @@ static void nal_process_read_urb(struct urb *urb)
 		spin_unlock(&priv->lock);
 	}
 
-	schedule_work(&priv->data_work);
+	if (priv->header_type != 1)
+		schedule_work(&priv->data_work);
 
 	if (buf[0] == 5 && urb->actual_length >= 2){
 		if (!priv->header_type)
